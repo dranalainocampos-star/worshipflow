@@ -223,41 +223,10 @@ export async function POST(request) {
         }
 
         if (action === 'draft-song') {
-            // 1. Get the standard prompts you already wrote
             const { systemPrompt, userPrompt } = buildSongDraftPrompts(payload);
-            
-            // 2. Secretly search the internet for the exact lyrics/chords!
-            let webLyrics = "No web context available.";
-            const searchTitle = payload.title || "Worship song";
-            const searchArtist = payload.artist || "";
-            
-            try {
-                if (process.env.TAVILY_API_KEY) {
-                    const searchRes = await fetch('https://api.tavily.com/search', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            api_key: process.env.TAVILY_API_KEY,
-                            query: `${searchTitle} by ${searchArtist} chords and lyrics text`,
-                            search_depth: "basic"
-                        })
-                    });
-                    const searchData = await searchRes.json();
-                    if (searchData.results && searchData.results.length > 0) {
-                        webLyrics = searchData.results[0].content;
-                    }
-                }
-            } catch (e) {
-                console.error("Web search failed, falling back to AI memory.");
-            }
-
-            // 3. Force Groq to use the internet text instead of its memory
-            const upgradedUserPrompt = `${userPrompt}\n\nCRITICAL INSTRUCTION: Do not guess the lyrics. I just searched the internet for the exact chord sheet. Read the raw text below and format it perfectly into your JSON response:\n\nRAW INTERNET CHORD SHEET:\n${webLyrics}`;
-
-            // 4. Send the super-prompt to Groq
             const draft = await callGroq(
                 systemPrompt,
-                upgradedUserPrompt,
+                userPrompt,
                 'worship_song_draft_response',
                 SONG_DRAFT_SCHEMA
             );
@@ -268,3 +237,12 @@ export async function POST(request) {
 
             return json({ draft });
         }
+
+        return json({ error: 'Unsupported action.' }, { status: 400 });
+    } catch (error) {
+        return json(
+            { error: error instanceof Error ? error.message : 'Unexpected server error.' },
+            { status: 500 }
+        );
+    }
+}
