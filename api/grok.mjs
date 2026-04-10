@@ -1,5 +1,7 @@
-const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-20b';
+const GROQ_MODEL_COMPOUND = 'groq/compound'; // Built-in tool model for web searching
+const GROQ_MODEL_STANDARD = process.env.GROQ_MODEL || 'openai/gpt-oss-20b'; // Fast model for setlists
 const VALID_SONG_KEYS = ['C', 'C#/Db', 'D', 'D#/Eb', 'E', 'F', 'F#/Gb', 'G', 'G#/Ab', 'A', 'A#/Bb', 'B'];
+
 const SETLIST_RESPONSE_SCHEMA = {
     type: 'object',
     additionalProperties: false,
@@ -21,6 +23,7 @@ const SETLIST_RESPONSE_SCHEMA = {
     },
     required: ['songs']
 };
+
 const SONG_DRAFT_SCHEMA = {
     type: 'object',
     additionalProperties: false,
@@ -37,22 +40,15 @@ const SONG_DRAFT_SCHEMA = {
 
 function json(data, init = {}) {
     return new Response(JSON.stringify(data), {
-        headers: {
-            'Content-Type': 'application/json'
-        },
+        headers: { 'Content-Type': 'application/json' },
         ...init
     });
 }
 
 function parseGrokJsonResponse(rawContent = '') {
     let cleanContent = rawContent.trim();
-
-    if (cleanContent.startsWith('```json')) {
-        cleanContent = cleanContent.replace(/^```json/, '').replace(/```$/, '').trim();
-    } else if (cleanContent.startsWith('```')) {
-        cleanContent = cleanContent.replace(/^```/, '').replace(/```$/, '').trim();
-    }
-
+    if (cleanContent.startsWith('```json')) cleanContent = cleanContent.replace(/^```json/, '').replace(/```$/, '').trim();
+    else if (cleanContent.startsWith('```')) cleanContent = cleanContent.replace(/^```/, '').replace(/```$/, '').trim();
     return JSON.parse(cleanContent);
 }
 
@@ -68,19 +64,8 @@ function buildSetlistPrompts(payload = {}) {
     const specificSongs = Array.isArray(payload.specificSongs) ? payload.specificSongs : [];
 
     const systemPrompt = `You are WorshipFlow AI, a precise JSON generator for worship setlists.
-You MUST respond ONLY with a raw JSON object that matches the required schema. Do NOT wrap the response in markdown blocks (e.g., \`\`\`json).
-Do not include any introductory or concluding text.
-
-Generate a setlist based on the user's prompt.
-Return an object with a single "songs" array.
-Each song object must include:
-- title
-- artist
-- youtubeId
-- chords
-
-If you are not confident about a YouTube video ID, use null.
-'chords' should be standard chord chart format utilizing line breaks.`;
+You MUST respond ONLY with a raw JSON object that matches the required schema. Do NOT wrap the response in markdown blocks.
+Generate a setlist based on the user's prompt.`;
 
     let userPrompt = 'Create a worship setlist. ';
     if (theme) userPrompt += `Theme: ${theme}. `;
@@ -101,53 +86,27 @@ If you are not confident about a YouTube video ID, use null.
 function buildSongDraftPrompts(payload = {}) {
     const title = String(payload.title || '').trim();
     const artist = String(payload.artist || '').trim();
-    const youtubeUrl = String(payload.youtubeUrl || '').trim();
     const originalKey = normalizeSongKey(payload.originalKey);
     const transposeTo = normalizeSongKey(payload.transposeTo || payload.originalKey);
 
-    const systemPrompt = `You are WorshipFlow AI, a precise JSON generator for manual worship song entry.
-You MUST respond ONLY with a raw JSON object that matches the required schema. Do NOT wrap the response in markdown blocks (e.g., \`\`\`json).
-Do not include any introductory or concluding text.
+    const systemPrompt = `You are WorshipFlow AI. Your primary goal is to find the EXACT lyrics and chords for songs.
+1. Use your built-in 'web_search' to find the song on ultimate-guitar.com.
+2. Use 'visit_website' to read the full page if necessary.
+3. Extract the exact lyrics and chords. Format the chords in [ChordName] format (e.g. [C], [Am]).
+4. You MUST respond ONLY with a raw JSON object matching the required schema. Do NOT wrap the response in markdown blocks.`;
 
-Return exactly this structure:
-{
-    "title": "Song Title",
-    "artist": "Artist Name",
-    "originalKey": "C",
-    "transposeTo": "C",
-    "notes": "Short optional performance note. Empty string if none.",
-    "chords": "Verse 1\\n[C]Lyrics line\\n[G]Next line"
-}
-
-Rules:
-- Never return null values.
-- For key fields, use only one of these values: C, C#/Db, D, D#/Eb, E, F, F#/Gb, G, G#/Ab, A, A#/Bb, B.
-- The chords field must be a usable draft in [Chord] format with section labels like Verse, Chorus, and Bridge.
-- Make the best possible worship-song draft using the provided title, artist, and YouTube URL.
-- If exact lyrics or chords are uncertain, still provide a clean best-effort draft without apologies or disclaimers inside the JSON.`;
-
-    const userPrompt = `Create a manual worship song draft for this request.
-Title: ${title || 'Not provided'}
-Artist: ${artist || 'Not provided'}
-YouTube URL: ${youtubeUrl || 'Not provided'}
-Selected Original Key: ${originalKey}
-Selected Transpose Key: ${transposeTo}
-
-Priorities:
-1. Fill in a likely title and artist when possible.
-2. Suggest a likely original key.
-3. Return a useful lyrics-and-chords draft for quick manual editing.
-4. Keep notes short and optional.`;
+    const userPrompt = `Find exact lyrics and chords from ultimate-guitar.com for the song: "${title || 'Unknown Title'}" by ${artist || 'Unknown Artist'}. 
+    Original Key: ${originalKey}
+    Transpose Key: ${transposeTo}
+    Format the final output strictly as JSON.`;
 
     return { systemPrompt, userPrompt };
 }
 
-async function callGroq(systemPrompt, userPrompt, schemaName, schema) {
+// Standard call for Setlists (No tools, fast response)
+async function callGroqStandard(systemPrompt, userPrompt, schemaName, schema) {
     const apiKey = process.env.GROQ_API_KEY;
-
-    if (!apiKey) {
-        throw new Error('GROQ_API_KEY is not configured on the server.');
-    }
+    if (!apiKey) throw new Error('GROQ_API_KEY is not configured on the server.');
 
     const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
@@ -156,41 +115,51 @@ async function callGroq(systemPrompt, userPrompt, schemaName, schema) {
             'Authorization': `Bearer ${apiKey}`
         },
         body: JSON.stringify({
-            model: GROQ_MODEL,
+            model: GROQ_MODEL_STANDARD,
             messages: [
                 { role: 'system', content: systemPrompt },
                 { role: 'user', content: userPrompt }
             ],
             temperature: 0.2,
-            response_format: {
-                type: 'json_schema',
-                json_schema: {
-                    name: schemaName,
-                    strict: true,
-                    schema
-                }
-            }
+            response_format: { type: 'json_schema', json_schema: { name: schemaName, strict: true, schema } }
         })
     });
 
-    if (!response.ok) {
-        const errorText = await response.text();
-        let detail = errorText;
+    if (!response.ok) throw new Error(`Groq API Error: ${await response.text()}`);
+    const data = await response.json();
+    return parseGrokJsonResponse(data.choices?.[0]?.message?.content || '');
+}
 
-        try {
-            const parsed = JSON.parse(errorText);
-            detail =
-                parsed.error?.message ||
-                parsed.message ||
-                parsed.error ||
-                errorText;
-        } catch (error) {
-            detail = errorText;
-        }
+// Compound call for Song Drafts (Uses Groq's built-in web search & browsing)
+async function callGroqAgent(systemPrompt, userPrompt) {
+    const apiKey = process.env.GROQ_API_KEY;
+    if (!apiKey) throw new Error('GROQ_API_KEY is not configured on the server.');
 
-        throw new Error(`Groq API returned status ${response.status}: ${detail}`);
-    }
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+            model: GROQ_MODEL_COMPOUND,
+            messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: userPrompt }
+            ],
+            temperature: 0.1,
+            // Enable Groq's internal built-in tools
+            compound_custom: {
+                tools: {
+                    enabled_tools: ["web_search", "visit_website"]
+                }
+            },
+            // Ask for JSON object mode so the scraped data fits your UI exactly
+            response_format: { type: 'json_object' }
+        })
+    });
 
+    if (!response.ok) throw new Error(`Groq API Error: ${await response.text()}`);
     const data = await response.json();
     return parseGrokJsonResponse(data.choices?.[0]?.message?.content || '');
 }
@@ -207,7 +176,7 @@ export async function POST(request) {
 
         if (action === 'generate-setlist') {
             const { systemPrompt, userPrompt } = buildSetlistPrompts(payload);
-            const result = await callGroq(
+            const result = await callGroqStandard(
                 systemPrompt,
                 userPrompt,
                 'worship_setlist_response',
@@ -224,13 +193,9 @@ export async function POST(request) {
 
         if (action === 'draft-song') {
             const { systemPrompt, userPrompt } = buildSongDraftPrompts(payload);
-            const draft = await callGroq(
-                systemPrompt,
-                userPrompt,
-                'worship_song_draft_response',
-                SONG_DRAFT_SCHEMA
-            );
+            const draft = await callGroqAgent(systemPrompt, userPrompt);
 
+            // Basic validation to ensure it didn't just return a blank string
             if (!draft || Array.isArray(draft) || typeof draft !== 'object') {
                 return json({ error: 'Groq returned an invalid song draft format.' }, { status: 502 });
             }
